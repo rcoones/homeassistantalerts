@@ -23,6 +23,7 @@
     "sustained_minutes": 30,
     "repeat_alert_minutes": 60,
     "setpoint_threshold_f": "76",
+    "github_repo": "REPLACE_ME/REPLACE_ME",
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/core:target-partitions": ["aws", "aws-cn"],

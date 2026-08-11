@@ -33,6 +33,7 @@ class NestAlertStack(Stack):
         setpoint_threshold_f = str(
             self.node.try_get_context("setpoint_threshold_f") or "76"
         )
+        github_repo = self.node.try_get_context("github_repo") or "rcoones/homeassistantalerts"
 
         for name, value in {
             "sender_email": sender_email,
@@ -118,5 +119,48 @@ class NestAlertStack(Stack):
         )
         rule.add_target(targets.LambdaFunction(fn))
 
+        # Lets GitHub Actions deploy this stack via short-lived federated
+        # credentials (no long-lived AWS keys stored in GitHub). Trust is
+        # restricted to this exact repo's main branch, so only a run
+        # triggered by a push to main (i.e. a merged PR) can assume it. The
+        # role itself only gets sts:AssumeRole on the CDK bootstrap roles
+        # (already scoped by `cdk bootstrap`'s own policies), not direct
+        # access to any AWS service.
+        github_oidc_provider = iam.OpenIdConnectProvider(
+            self,
+            "GitHubOidcProvider",
+            url="https://token.actions.githubusercontent.com",
+            client_ids=["sts.amazonaws.com"],
+        )
+        github_deploy_role = iam.Role(
+            self,
+            "GitHubActionsDeployRole",
+            assumed_by=iam.FederatedPrincipal(
+                github_oidc_provider.open_id_connect_provider_arn,
+                conditions={
+                    "StringEquals": {
+                        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+                    },
+                    "StringLike": {
+                        "token.actions.githubusercontent.com:sub": f"repo:{github_repo}:ref:refs/heads/main"
+                    },
+                },
+                assume_role_action="sts:AssumeRoleWithWebIdentity",
+            ),
+            max_session_duration=Duration.hours(1),
+        )
+        github_deploy_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["sts:AssumeRole"],
+                resources=[
+                    f"arn:{self.partition}:iam::{self.account}:role/cdk-hnb659fds-deploy-role-{self.account}-{self.region}",
+                    f"arn:{self.partition}:iam::{self.account}:role/cdk-hnb659fds-file-publishing-role-{self.account}-{self.region}",
+                    f"arn:{self.partition}:iam::{self.account}:role/cdk-hnb659fds-image-publishing-role-{self.account}-{self.region}",
+                    f"arn:{self.partition}:iam::{self.account}:role/cdk-hnb659fds-lookup-role-{self.account}-{self.region}",
+                ],
+            )
+        )
+
         CfnOutput(self, "SecretArn", value=google_secret.secret_arn)
         CfnOutput(self, "FunctionName", value=fn.function_name)
+        CfnOutput(self, "GitHubActionsDeployRoleArn", value=github_deploy_role.role_arn)

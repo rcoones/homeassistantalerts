@@ -1,0 +1,44 @@
+name: PR Validate
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synth:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install CDK CLI
+        run: npm install -g aws-cdk
+
+      - name: Install CDK app dependencies
+        working-directory: cdk
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # cdk.json (real project/device IDs, email) is gitignored on purpose.
+      # The example file has the same shape with placeholders, which is all
+      # `cdk synth` needs to validate the app builds correctly — no AWS
+      # credentials or real secrets are needed for this step.
+      - name: Use placeholder context for validation
+        working-directory: cdk
+        run: cp cdk.json.example cdk.json
+
+      - name: cdk synth
+        working-directory: cdk
+        run: cdk synth

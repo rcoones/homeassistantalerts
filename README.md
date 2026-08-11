@@ -80,6 +80,8 @@ Then edit `cdk.json`'s `context` block:
 - `sustained_minutes` — default 30
 - `repeat_alert_minutes` — default 60
 - `setpoint_threshold_f` — default 76
+- `github_repo` — `owner/repo` of this GitHub repo (used to scope the
+  GitHub Actions deploy role's trust policy, see below)
 
 ## Deploy
 
@@ -120,6 +122,56 @@ Check CloudWatch Logs (`/aws/lambda/<FunctionName>`) for details if
 something goes wrong (bad refresh token, unverified SES identity, wrong
 project/device ID, etc).
 
+## CI/CD (GitHub Actions)
+
+Two workflows, both scoped to `main`:
+
+- **`.github/workflows/pr-validate.yml`** — on every PR targeting `main`,
+  runs `cdk synth` (using `cdk.json.example`'s placeholder values, so it
+  needs no AWS credentials or secrets) to catch syntax/config errors before
+  merge. Safe to run on PRs from anyone, since it never touches AWS.
+- **`.github/workflows/deploy.yml`** — on push to `main` (i.e. once a PR is
+  merged), authenticates to AWS via OIDC and runs `cdk deploy` for real.
+
+The deploy workflow authenticates as `GitHubActionsDeployRole`, an IAM role
+created by this same CDK stack (see `nest_alert_stack.py`) that:
+- trusts only `token.actions.githubusercontent.com`, scoped by condition to
+  `repo:<github_repo>:ref:refs/heads/main` — no other repo or branch can
+  assume it, and there's no long-lived AWS key sitting in GitHub
+- can only `sts:AssumeRole` into the CDK bootstrap roles (deploy,
+  file-publishing, image-publishing, lookup) already created by
+  `cdk bootstrap` — it has no direct AWS permissions of its own
+
+After deploying this stack at least once (so the role exists), add these
+as **repository secrets** (Settings -> Secrets and variables -> Actions ->
+New repository secret) — do this yourself, not by pasting real values into
+a chat:
+
+| Secret | Value |
+|---|---|
+| `AWS_DEPLOY_ROLE_ARN` | the `GitHubActionsDeployRoleArn` stack output |
+| `SENDER_EMAIL` | same as your local `cdk.json`'s `sender_email` |
+| `RECIPIENT_EMAIL` | same as your local `cdk.json`'s `recipient_email` |
+| `NEST_PROJECT_ID` | same as your local `cdk.json`'s `nest_project_id` |
+| `NEST_DEVICE_ID` | same as your local `cdk.json`'s `nest_device_id` |
+
+Get the role ARN with:
+
+```bash
+aws cloudformation describe-stacks --stack-name NestTempAlertStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`GitHubActionsDeployRoleArn`].OutputValue' --output text
+```
+
+The Google OAuth secret (`secret.json`) and any tunable thresholds beyond
+the `cdk.json.example` defaults still aren't managed by CI — populate the
+former manually per the section above, and change the latter by editing
+`cdk.json.example`'s defaults (or add more secrets/`-c` overrides to
+`deploy.yml` if you want them independently tunable per environment).
+
+Optionally, add branch protection on `main` requiring the PR Validate check
+to pass before merge, and/or configure a `production` GitHub Environment
+with required reviewers on the `deploy` job for a manual approval gate.
+
 ## Tear down
 
 ```bash
@@ -127,3 +179,7 @@ cd cdk
 source .venv/bin/activate
 cdk destroy
 ```
+
+Also delete the `production` GitHub Environment and revoke/rotate the
+`AWS_DEPLOY_ROLE_ARN` secret if you tear down the stack, since `cdk destroy`
+removes the IAM role it names.
