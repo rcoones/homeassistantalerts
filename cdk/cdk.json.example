@@ -21,6 +21,7 @@
     "temp_threshold_f": "76",
     "schedule_rate_minutes": 15,
     "sustained_minutes": 30,
+    "repeat_alert_minutes": 60,
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/core:target-partitions": ["aws", "aws-cn"],

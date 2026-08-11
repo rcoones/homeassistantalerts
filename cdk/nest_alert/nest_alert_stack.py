@@ -27,6 +27,9 @@ class NestAlertStack(Stack):
             self.node.try_get_context("schedule_rate_minutes") or 15
         )
         sustained_minutes = str(self.node.try_get_context("sustained_minutes") or "30")
+        repeat_alert_minutes = str(
+            self.node.try_get_context("repeat_alert_minutes") or "60"
+        )
 
         for name, value in {
             "sender_email": sender_email,
@@ -60,14 +63,14 @@ class NestAlertStack(Stack):
             identity=ses.Identity.email(sender_email),
         )
 
-        # Tracks when the current over-threshold streak started ("none" if
-        # not currently over threshold), so alerts only fire once the
-        # temperature has been sustained above the threshold for long enough.
+        # Tracks the current over-threshold streak's start time and the last
+        # alert time (both null if not currently over threshold), so alerts
+        # only fire once sustained, then at most every repeat_alert_minutes.
         state_param = ssm.StringParameter(
             self,
             "SustainedOverState",
-            description="Timestamp the ambient temp first exceeded the alert threshold in the current streak, or 'none'",
-            string_value="none",
+            description="JSON {over_since, last_alert_at} tracking the current over-threshold streak",
+            string_value='{"over_since": null, "last_alert_at": null}',
         )
 
         fn = _lambda.DockerImageFunction(
@@ -84,6 +87,7 @@ class NestAlertStack(Stack):
                 "RECIPIENT_EMAIL": recipient_email,
                 "TEMP_THRESHOLD_F": temp_threshold_f,
                 "SUSTAINED_MINUTES": sustained_minutes,
+                "REPEAT_ALERT_MINUTES": repeat_alert_minutes,
                 "STATE_PARAM_NAME": state_param.parameter_name,
             },
         )

@@ -16,8 +16,6 @@ secrets_client = boto3.client("secretsmanager")
 ses_client = boto3.client("ses")
 ssm_client = boto3.client("ssm")
 
-NO_STREAK = "none"
-
 
 def get_google_credentials():
     secret_arn = os.environ["SECRET_ARN"]
@@ -51,16 +49,22 @@ def get_ambient_temp_f(access_token, project_id, device_id):
     return temp_c * 9 / 5 + 32
 
 
-def get_over_since(param_name):
+def get_state(param_name):
     value = ssm_client.get_parameter(Name=param_name)["Parameter"]["Value"]
-    if value == NO_STREAK:
-        return None
-    return datetime.fromisoformat(value)
+    data = json.loads(value)
+    over_since = datetime.fromisoformat(data["over_since"]) if data.get("over_since") else None
+    last_alert_at = (
+        datetime.fromisoformat(data["last_alert_at"]) if data.get("last_alert_at") else None
+    )
+    return over_since, last_alert_at
 
 
-def set_over_since(param_name, over_since):
-    value = over_since.isoformat() if over_since else NO_STREAK
-    ssm_client.put_parameter(Name=param_name, Value=value, Overwrite=True)
+def set_state(param_name, over_since, last_alert_at):
+    data = {
+        "over_since": over_since.isoformat() if over_since else None,
+        "last_alert_at": last_alert_at.isoformat() if last_alert_at else None,
+    }
+    ssm_client.put_parameter(Name=param_name, Value=json.dumps(data), Overwrite=True)
 
 
 def send_alert_email(sender, recipient, temp_f, threshold_f, sustained_minutes):
@@ -83,6 +87,7 @@ def send_alert_email(sender, recipient, temp_f, threshold_f, sustained_minutes):
 def handler(event, context):
     threshold_f = float(os.environ.get("TEMP_THRESHOLD_F", "76"))
     sustained_minutes_required = float(os.environ.get("SUSTAINED_MINUTES", "30"))
+    repeat_alert_minutes = float(os.environ.get("REPEAT_ALERT_MINUTES", "60"))
     project_id = os.environ["NEST_PROJECT_ID"]
     device_id = os.environ["NEST_DEVICE_ID"]
     sender = os.environ["SENDER_EMAIL"]
@@ -98,7 +103,7 @@ def handler(event, context):
 
     temp_f = get_ambient_temp_f(access_token, project_id, device_id)
     now = datetime.now(timezone.utc)
-    over_since = get_over_since(state_param_name)
+    over_since, last_alert_at = get_state(state_param_name)
     logger.info("Ambient temperature: %.1fF (threshold %.0fF)", temp_f, threshold_f)
 
     alert_sent = False
@@ -106,14 +111,27 @@ def handler(event, context):
     if temp_f > threshold_f:
         if over_since is None:
             over_since = now
-            set_over_since(state_param_name, over_since)
+            set_state(state_param_name, over_since, None)
             logger.info("Temperature exceeded threshold; starting sustained timer.")
         else:
             sustained_minutes = (now - over_since).total_seconds() / 60
             if sustained_minutes >= sustained_minutes_required:
-                send_alert_email(sender, recipient, temp_f, threshold_f, sustained_minutes)
-                alert_sent = True
-                logger.info("Alert email sent to %s", recipient)
+                if last_alert_at is None:
+                    should_alert = True
+                else:
+                    minutes_since_last_alert = (now - last_alert_at).total_seconds() / 60
+                    should_alert = minutes_since_last_alert >= repeat_alert_minutes
+                if should_alert:
+                    send_alert_email(sender, recipient, temp_f, threshold_f, sustained_minutes)
+                    alert_sent = True
+                    set_state(state_param_name, over_since, now)
+                    logger.info("Alert email sent to %s", recipient)
+                else:
+                    logger.info(
+                        "Sustained over threshold but alerted %.1f min ago (< %.0f min); skipping.",
+                        (now - last_alert_at).total_seconds() / 60,
+                        repeat_alert_minutes,
+                    )
             else:
                 logger.info(
                     "Over threshold for %.1f min (< %.0f min required); not alerting yet.",
@@ -122,7 +140,7 @@ def handler(event, context):
                 )
     else:
         if over_since is not None:
-            set_over_since(state_param_name, None)
+            set_state(state_param_name, None, None)
             logger.info("Temperature back under threshold; resetting sustained timer.")
 
     return {

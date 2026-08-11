@@ -18,15 +18,19 @@ to your own address.
   the link SES emails you). If sender == recipient (the default here), one
   verification covers both, and you can stay in the SES sandbox indefinitely
   since you're only ever emailing yourself.
-- **SSM Parameter Store**: holds a single string parameter tracking when the
-  current over-threshold streak started (or `"none"`). Used to require the
-  temperature be sustained above threshold for `sustained_minutes` (default
-  30) before the first alert — a single brief spike won't page you.
+- **SSM Parameter Store**: holds a JSON parameter `{over_since,
+  last_alert_at}` tracking the current over-threshold streak. Used to
+  require the temperature be sustained above threshold for
+  `sustained_minutes` (default 30) before the first alert — a single brief
+  spike won't page you — and to throttle repeat alerts to at most once per
+  `repeat_alert_minutes` (default 60) after that.
 
-Note on repeats: once the sustained threshold is met, every subsequent tick
-that's still over threshold sends another email (no cooldown after the
-first alert). If that gets noisy, ask to add an "alert once per streak"
-suppression.
+Alert timing: first alert fires once the temp has been continuously over
+threshold for `sustained_minutes`. After that, another alert fires only
+once `repeat_alert_minutes` has passed since the last one sent, as long as
+the temp is still over threshold. Dropping back at/under threshold resets
+the streak entirely (next time it goes over, the sustained timer starts
+over from zero).
 
 ## Prerequisites
 
@@ -70,6 +74,7 @@ Then edit `cdk.json`'s `context` block:
 - `temp_threshold_f` — default 76
 - `schedule_rate_minutes` — default 15
 - `sustained_minutes` — default 30
+- `repeat_alert_minutes` — default 60
 
 ## Deploy
 
