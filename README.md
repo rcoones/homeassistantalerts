@@ -136,8 +136,10 @@ Two workflows, both scoped to `main`:
 The deploy workflow authenticates as `GitHubActionsDeployRole`, an IAM role
 created by this same CDK stack (see `nest_alert_stack.py`) that:
 - trusts only `token.actions.githubusercontent.com`, scoped by condition to
-  `repo:<github_repo>:ref:refs/heads/main` — no other repo or branch can
-  assume it, and there's no long-lived AWS key sitting in GitHub
+  `repo:<owner>*/<repo>*:ref:refs/heads/main` (the wildcards tolerate
+  GitHub's numeric-ID-suffixed `sub` claim format, e.g.
+  `repo:owner@123/repo@456:ref:...`) — no other repo or branch can assume
+  it, and there's no long-lived AWS key sitting in GitHub
 - can only `sts:AssumeRole` into the CDK bootstrap roles (deploy,
   file-publishing, image-publishing, lookup) already created by
   `cdk bootstrap` — it has no direct AWS permissions of its own

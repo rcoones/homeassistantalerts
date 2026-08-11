@@ -132,6 +132,14 @@ class NestAlertStack(Stack):
             url="https://token.actions.githubusercontent.com",
             client_ids=["sts.amazonaws.com"],
         )
+        github_owner, github_repo_name = github_repo.split("/", 1)
+        # GitHub's OIDC sub claim appends stable numeric IDs to the
+        # owner/repo names (e.g. "repo:owner@123/repo@456:ref:...") rather
+        # than the plain "repo:owner/repo:ref:..." form, so the trust
+        # condition needs wildcards after each name to match. GitHub
+        # usernames/org names can't contain "@", so this can't accidentally
+        # match a different owner.
+        github_sub_pattern = f"repo:{github_owner}*/{github_repo_name}*:ref:refs/heads/main"
         github_deploy_role = iam.Role(
             self,
             "GitHubActionsDeployRole",
@@ -142,7 +150,7 @@ class NestAlertStack(Stack):
                         "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
                     },
                     "StringLike": {
-                        "token.actions.githubusercontent.com:sub": f"repo:{github_repo}:ref:refs/heads/main"
+                        "token.actions.githubusercontent.com:sub": github_sub_pattern
                     },
                 },
                 assume_role_action="sts:AssumeRoleWithWebIdentity",

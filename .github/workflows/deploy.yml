@@ -15,16 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # TEMP DEBUG: print the actual OIDC token claims (not secret) so we
-      # can compare against the IAM trust policy condition.
-      - name: Debug OIDC claims
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const id_token = await core.getIDToken('sts.amazonaws.com');
-            const payload = JSON.parse(Buffer.from(id_token.split('.')[1], 'base64').toString());
-            console.log(JSON.stringify({ sub: payload.sub, aud: payload.aud, repository: payload.repository, ref: payload.ref, event_name: payload.event_name }, null, 2));
-
       # Federated (OIDC) auth: no long-lived AWS keys stored in GitHub.
       # AWS_DEPLOY_ROLE_ARN's trust policy only allows this exact repo on
       # the main branch to assume it (see cdk/nest_alert/nest_alert_stack.py).
