@@ -38,42 +38,81 @@ def get_access_token(client_id, client_secret, refresh_token):
     return resp.json()["access_token"]
 
 
-def get_ambient_temp_f(access_token, project_id, device_id):
+def c_to_f(celsius):
+    return celsius * 9 / 5 + 32
+
+
+def get_device_traits(access_token, project_id, device_id):
     url = f"{SDM_BASE}/enterprises/{project_id}/devices/{device_id}"
     resp = requests.get(
         url, headers={"Authorization": f"Bearer {access_token}"}, timeout=10
     )
     resp.raise_for_status()
     traits = resp.json().get("traits", {})
-    temp_c = traits["sdm.devices.traits.Temperature"]["ambientTemperatureCelsius"]
-    return temp_c * 9 / 5 + 32
+
+    ambient_temp_f = c_to_f(
+        traits["sdm.devices.traits.Temperature"]["ambientTemperatureCelsius"]
+    )
+
+    setpoint_trait = traits.get("sdm.devices.traits.ThermostatTemperatureSetpoint", {})
+    cool_setpoint_c = setpoint_trait.get("coolCelsius")
+    cool_setpoint_f = c_to_f(cool_setpoint_c) if cool_setpoint_c is not None else None
+
+    return ambient_temp_f, cool_setpoint_f
+
+
+def _parse_streak(streak):
+    over_since = datetime.fromisoformat(streak["over_since"]) if streak.get("over_since") else None
+    last_alert_at = (
+        datetime.fromisoformat(streak["last_alert_at"]) if streak.get("last_alert_at") else None
+    )
+    return over_since, last_alert_at
+
+
+def _serialize_streak(over_since, last_alert_at):
+    return {
+        "over_since": over_since.isoformat() if over_since else None,
+        "last_alert_at": last_alert_at.isoformat() if last_alert_at else None,
+    }
 
 
 def get_state(param_name):
     value = ssm_client.get_parameter(Name=param_name)["Parameter"]["Value"]
     data = json.loads(value)
-    over_since = datetime.fromisoformat(data["over_since"]) if data.get("over_since") else None
-    last_alert_at = (
-        datetime.fromisoformat(data["last_alert_at"]) if data.get("last_alert_at") else None
-    )
-    return over_since, last_alert_at
+    return _parse_streak(data["ambient"]), _parse_streak(data["setpoint"])
 
 
-def set_state(param_name, over_since, last_alert_at):
+def set_state(param_name, ambient_streak, setpoint_streak):
     data = {
-        "over_since": over_since.isoformat() if over_since else None,
-        "last_alert_at": last_alert_at.isoformat() if last_alert_at else None,
+        "ambient": _serialize_streak(*ambient_streak),
+        "setpoint": _serialize_streak(*setpoint_streak),
     }
     ssm_client.put_parameter(Name=param_name, Value=json.dumps(data), Overwrite=True)
 
 
-def send_alert_email(sender, recipient, temp_f, threshold_f, sustained_minutes):
-    subject = f"Thermostat alert: {temp_f:.1f}F (over {threshold_f:.0f}F)"
-    body = (
-        f"Your Nest thermostat is reading {temp_f:.1f}F, above your "
-        f"{threshold_f:.0f}F threshold for {sustained_minutes:.0f} minutes, "
-        f"as of {datetime.now(timezone.utc).isoformat()}.\n\nTake a look."
-    )
+def evaluate_streak(is_over, now, over_since, last_alert_at, sustained_minutes_required, repeat_alert_minutes):
+    """Returns (should_alert, new_over_since, new_last_alert_at, sustained_minutes)."""
+    if not is_over:
+        return False, None, None, 0.0
+
+    if over_since is None:
+        over_since = now
+    sustained_minutes = (now - over_since).total_seconds() / 60
+
+    should_alert = False
+    if sustained_minutes >= sustained_minutes_required:
+        if last_alert_at is None:
+            should_alert = True
+        else:
+            minutes_since_last_alert = (now - last_alert_at).total_seconds() / 60
+            should_alert = minutes_since_last_alert >= repeat_alert_minutes
+        if should_alert:
+            last_alert_at = now
+
+    return should_alert, over_since, last_alert_at, sustained_minutes
+
+
+def send_alert_email(sender, recipient, subject, body):
     ses_client.send_email(
         Source=sender,
         Destination={"ToAddresses": [recipient]},
@@ -88,6 +127,7 @@ def handler(event, context):
     threshold_f = float(os.environ.get("TEMP_THRESHOLD_F", "76"))
     sustained_minutes_required = float(os.environ.get("SUSTAINED_MINUTES", "30"))
     repeat_alert_minutes = float(os.environ.get("REPEAT_ALERT_MINUTES", "60"))
+    setpoint_threshold_f = float(os.environ.get("SETPOINT_THRESHOLD_F", "76"))
     project_id = os.environ["NEST_PROJECT_ID"]
     device_id = os.environ["NEST_DEVICE_ID"]
     sender = os.environ["SENDER_EMAIL"]
@@ -101,50 +141,72 @@ def handler(event, context):
         creds["google_refresh_token"],
     )
 
-    temp_f = get_ambient_temp_f(access_token, project_id, device_id)
+    ambient_temp_f, setpoint_f = get_device_traits(access_token, project_id, device_id)
     now = datetime.now(timezone.utc)
-    over_since, last_alert_at = get_state(state_param_name)
-    logger.info("Ambient temperature: %.1fF (threshold %.0fF)", temp_f, threshold_f)
+    (ambient_over_since, ambient_last_alert_at), (setpoint_over_since, setpoint_last_alert_at) = get_state(
+        state_param_name
+    )
 
-    alert_sent = False
-    sustained_minutes = 0.0
-    if temp_f > threshold_f:
-        if over_since is None:
-            over_since = now
-            set_state(state_param_name, over_since, None)
-            logger.info("Temperature exceeded threshold; starting sustained timer.")
-        else:
-            sustained_minutes = (now - over_since).total_seconds() / 60
-            if sustained_minutes >= sustained_minutes_required:
-                if last_alert_at is None:
-                    should_alert = True
-                else:
-                    minutes_since_last_alert = (now - last_alert_at).total_seconds() / 60
-                    should_alert = minutes_since_last_alert >= repeat_alert_minutes
-                if should_alert:
-                    send_alert_email(sender, recipient, temp_f, threshold_f, sustained_minutes)
-                    alert_sent = True
-                    set_state(state_param_name, over_since, now)
-                    logger.info("Alert email sent to %s", recipient)
-                else:
-                    logger.info(
-                        "Sustained over threshold but alerted %.1f min ago (< %.0f min); skipping.",
-                        (now - last_alert_at).total_seconds() / 60,
-                        repeat_alert_minutes,
-                    )
-            else:
-                logger.info(
-                    "Over threshold for %.1f min (< %.0f min required); not alerting yet.",
-                    sustained_minutes,
-                    sustained_minutes_required,
-                )
+    logger.info("Ambient temperature: %.1fF (threshold %.0fF)", ambient_temp_f, threshold_f)
+    if setpoint_f is not None:
+        logger.info("Cooling setpoint: %.1fF (threshold %.0fF)", setpoint_f, setpoint_threshold_f)
     else:
-        if over_since is not None:
-            set_state(state_param_name, None, None)
-            logger.info("Temperature back under threshold; resetting sustained timer.")
+        logger.info("No cooling setpoint reported (thermostat not in COOL/HEATCOOL mode).")
+
+    ambient_alert_sent, ambient_over_since, ambient_last_alert_at, sustained_minutes = evaluate_streak(
+        ambient_temp_f > threshold_f,
+        now,
+        ambient_over_since,
+        ambient_last_alert_at,
+        sustained_minutes_required,
+        repeat_alert_minutes,
+    )
+    if ambient_alert_sent:
+        send_alert_email(
+            sender,
+            recipient,
+            subject=f"Thermostat alert: {ambient_temp_f:.1f}F (over {threshold_f:.0f}F)",
+            body=(
+                f"Your Nest thermostat is reading {ambient_temp_f:.1f}F, above your "
+                f"{threshold_f:.0f}F threshold for {sustained_minutes:.0f} minutes, "
+                f"as of {now.isoformat()}.\n\nTake a look."
+            ),
+        )
+        logger.info("Ambient temperature alert email sent to %s", recipient)
+
+    setpoint_alert_sent = False
+    if setpoint_f is not None:
+        setpoint_alert_sent, setpoint_over_since, setpoint_last_alert_at, _ = evaluate_streak(
+            setpoint_f > setpoint_threshold_f,
+            now,
+            setpoint_over_since,
+            setpoint_last_alert_at,
+            0.0,
+            repeat_alert_minutes,
+        )
+        if setpoint_alert_sent:
+            send_alert_email(
+                sender,
+                recipient,
+                subject=f"Thermostat alert: cooling setpoint {setpoint_f:.1f}F (over {setpoint_threshold_f:.0f}F)",
+                body=(
+                    f"Your Nest thermostat's cooling setpoint is now {setpoint_f:.1f}F, "
+                    f"above your {setpoint_threshold_f:.0f}F threshold, as of "
+                    f"{now.isoformat()}. Someone may have changed it.\n\nTake a look."
+                ),
+            )
+            logger.info("Setpoint alert email sent to %s", recipient)
+
+    set_state(
+        state_param_name,
+        (ambient_over_since, ambient_last_alert_at),
+        (setpoint_over_since, setpoint_last_alert_at),
+    )
 
     return {
-        "temperature_f": round(temp_f, 1),
+        "ambient_temp_f": round(ambient_temp_f, 1),
         "sustained_minutes": round(sustained_minutes, 1),
-        "alert_sent": alert_sent,
+        "ambient_alert_sent": ambient_alert_sent,
+        "setpoint_f": round(setpoint_f, 1) if setpoint_f is not None else None,
+        "setpoint_alert_sent": setpoint_alert_sent,
     }

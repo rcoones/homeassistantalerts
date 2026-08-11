@@ -1,36 +1,40 @@
 # Nest Thermostat Temp Alert
 
 EventBridge schedule -> Lambda (Docker container, Python) -> checks the Nest
-thermostat's ambient temperature via the Google Smart Device Management (SDM)
-API -> if it's over the threshold (default 76F), sends an email alert via SES
-to your own address.
+thermostat via the Google Smart Device Management (SDM) API -> emails an
+alert via SES to your own address if either:
+- the **ambient temperature** is sustained over threshold (default 76F), or
+- the **cooling setpoint** is over threshold (default 76F) — e.g. someone
+  bumped the thermostat up.
 
 ## Architecture
 
 - **EventBridge Rule**: runs on a fixed rate (default every 15 min).
 - **Lambda (container image)**: refreshes a Google OAuth access token from a
   stored refresh token, calls the SDM API for the device's
-  `ambientTemperatureCelsius`, converts to F, and emails an alert if it's
-  over the threshold.
+  `ambientTemperatureCelsius` and `ThermostatTemperatureSetpoint.coolCelsius`,
+  converts both to F, and evaluates each against its own threshold.
 - **Secrets Manager**: holds `google_client_id` / `google_client_secret` /
   `google_refresh_token`. Never committed to the repo.
 - **SES**: sends the alert email. Sender identity must be verified (click
   the link SES emails you). If sender == recipient (the default here), one
   verification covers both, and you can stay in the SES sandbox indefinitely
   since you're only ever emailing yourself.
-- **SSM Parameter Store**: holds a JSON parameter `{over_since,
-  last_alert_at}` tracking the current over-threshold streak. Used to
-  require the temperature be sustained above threshold for
-  `sustained_minutes` (default 30) before the first alert — a single brief
-  spike won't page you — and to throttle repeat alerts to at most once per
-  `repeat_alert_minutes` (default 60) after that.
+- **SSM Parameter Store**: holds a JSON parameter `{ambient, setpoint}`,
+  each an independent `{over_since, last_alert_at}` streak.
 
-Alert timing: first alert fires once the temp has been continuously over
-threshold for `sustained_minutes`. After that, another alert fires only
-once `repeat_alert_minutes` has passed since the last one sent, as long as
-the temp is still over threshold. Dropping back at/under threshold resets
-the streak entirely (next time it goes over, the sustained timer starts
-over from zero).
+Alert timing:
+- **Ambient temp**: first alert fires once the temp has been continuously
+  over threshold for `sustained_minutes` (default 30) — a brief spike won't
+  page you. After that, another alert fires only once
+  `repeat_alert_minutes` (default 60) has passed since the last one, as
+  long as it's still over threshold. Dropping back at/under threshold
+  resets the streak (next time it goes over, the sustained timer restarts).
+- **Cooling setpoint**: alerts immediately (no sustained wait — it's a
+  discrete change, not a fluctuating reading), then throttled to at most
+  once per `repeat_alert_minutes` while it stays over threshold. Only
+  evaluated when the thermostat reports a cooling setpoint (i.e. in COOL or
+  HEATCOOL mode).
 
 ## Prerequisites
 
@@ -75,6 +79,7 @@ Then edit `cdk.json`'s `context` block:
 - `schedule_rate_minutes` — default 15
 - `sustained_minutes` — default 30
 - `repeat_alert_minutes` — default 60
+- `setpoint_threshold_f` — default 76
 
 ## Deploy
 

@@ -30,6 +30,9 @@ class NestAlertStack(Stack):
         repeat_alert_minutes = str(
             self.node.try_get_context("repeat_alert_minutes") or "60"
         )
+        setpoint_threshold_f = str(
+            self.node.try_get_context("setpoint_threshold_f") or "76"
+        )
 
         for name, value in {
             "sender_email": sender_email,
@@ -63,14 +66,16 @@ class NestAlertStack(Stack):
             identity=ses.Identity.email(sender_email),
         )
 
-        # Tracks the current over-threshold streak's start time and the last
-        # alert time (both null if not currently over threshold), so alerts
-        # only fire once sustained, then at most every repeat_alert_minutes.
+        # Tracks two independent over-threshold streaks (ambient temp and
+        # cooling setpoint), each as {over_since, last_alert_at}, so alerts
+        # only fire once sustained (if required), then at most every
+        # repeat_alert_minutes.
+        empty_streak = '{"over_since": null, "last_alert_at": null}'
         state_param = ssm.StringParameter(
             self,
             "SustainedOverState",
-            description="JSON {over_since, last_alert_at} tracking the current over-threshold streak",
-            string_value='{"over_since": null, "last_alert_at": null}',
+            description="JSON {ambient, setpoint} tracking the current over-threshold streaks",
+            string_value=f'{{"ambient": {empty_streak}, "setpoint": {empty_streak}}}',
         )
 
         fn = _lambda.DockerImageFunction(
@@ -88,6 +93,7 @@ class NestAlertStack(Stack):
                 "TEMP_THRESHOLD_F": temp_threshold_f,
                 "SUSTAINED_MINUTES": sustained_minutes,
                 "REPEAT_ALERT_MINUTES": repeat_alert_minutes,
+                "SETPOINT_THRESHOLD_F": setpoint_threshold_f,
                 "STATE_PARAM_NAME": state_param.parameter_name,
             },
         )
