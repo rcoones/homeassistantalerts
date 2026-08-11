@@ -169,8 +169,14 @@ former manually per the section above, and change the latter by editing
 `deploy.yml` if you want them independently tunable per environment).
 
 Optionally, add branch protection on `main` requiring the PR Validate check
-to pass before merge, and/or configure a `production` GitHub Environment
-with required reviewers on the `deploy` job for a manual approval gate.
+to pass before merge for an extra gate before code merges.
+
+Note: `deploy.yml`'s job deliberately does *not* set `environment:`. Adding
+a GitHub Environment (e.g. for required-reviewer approval gates) changes
+the OIDC token's `sub` claim from `repo:<repo>:ref:refs/heads/main` to
+`repo:<repo>:environment:<name>` — if you add one, you must also update
+`github_repo`'s trust condition in `nest_alert_stack.py` (and redeploy) to
+match, or the deploy role will stop authenticating.
 
 ## Tear down
 
@@ -180,6 +186,5 @@ source .venv/bin/activate
 cdk destroy
 ```
 
-Also delete the `production` GitHub Environment and revoke/rotate the
-`AWS_DEPLOY_ROLE_ARN` secret if you tear down the stack, since `cdk destroy`
-removes the IAM role it names.
+Also revoke/rotate the `AWS_DEPLOY_ROLE_ARN` secret if you tear down the
+stack, since `cdk destroy` removes the IAM role it names.
