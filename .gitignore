@@ -1,6 +1,7 @@
 cdk/.venv/
 cdk/cdk.out/
 cdk/secret.json
+cdk/ntfy_secret.json
 cdk/cdk.json
 cdk/cdk.context.json
 node_modules/

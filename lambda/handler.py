@@ -23,6 +23,12 @@ def get_google_credentials():
     return json.loads(resp["SecretString"])
 
 
+def get_ntfy_topic():
+    secret_arn = os.environ["NTFY_SECRET_ARN"]
+    resp = secrets_client.get_secret_value(SecretId=secret_arn)
+    return json.loads(resp["SecretString"])["ntfy_topic"]
+
+
 def get_access_token(client_id, client_secret, refresh_token):
     resp = requests.post(
         TOKEN_URL,
@@ -123,6 +129,28 @@ def send_alert_email(sender, recipient, subject, body):
     )
 
 
+def send_ntfy_notification(topic, title, message):
+    resp = requests.post(
+        f"https://ntfy.sh/{topic}",
+        data=message.encode("utf-8"),
+        headers={"Title": title, "Priority": "high", "Tags": "warning"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+
+
+def dispatch_alert(sender, recipient, subject, body, ntfy_topic, label):
+    send_alert_email(sender, recipient, subject=subject, body=body)
+    logger.info("%s alert email sent to %s", label, recipient)
+    if ntfy_topic is None:
+        return
+    try:
+        send_ntfy_notification(ntfy_topic, title=subject, message=body)
+        logger.info("%s alert push notification sent via ntfy", label)
+    except Exception:
+        logger.exception("Failed to send %s alert push notification via ntfy", label)
+
+
 def handler(event, context):
     threshold_f = float(os.environ.get("TEMP_THRESHOLD_F", "76"))
     sustained_minutes_required = float(os.environ.get("SUSTAINED_MINUTES", "30"))
@@ -161,19 +189,6 @@ def handler(event, context):
         sustained_minutes_required,
         repeat_alert_minutes,
     )
-    if ambient_alert_sent:
-        send_alert_email(
-            sender,
-            recipient,
-            subject=f"Thermostat alert: {ambient_temp_f:.1f}F (over {threshold_f:.0f}F)",
-            body=(
-                f"Your Nest thermostat is reading {ambient_temp_f:.1f}F, above your "
-                f"{threshold_f:.0f}F threshold for {sustained_minutes:.0f} minutes, "
-                f"as of {now.isoformat()}.\n\nTake a look."
-            ),
-        )
-        logger.info("Ambient temperature alert email sent to %s", recipient)
-
     setpoint_alert_sent = False
     if setpoint_f is not None:
         setpoint_alert_sent, setpoint_over_since, setpoint_last_alert_at, _ = evaluate_streak(
@@ -184,18 +199,48 @@ def handler(event, context):
             0.0,
             repeat_alert_minutes,
         )
-        if setpoint_alert_sent:
-            send_alert_email(
-                sender,
-                recipient,
-                subject=f"Thermostat alert: cooling setpoint {setpoint_f:.1f}F (over {setpoint_threshold_f:.0f}F)",
-                body=(
-                    f"Your Nest thermostat's cooling setpoint is now {setpoint_f:.1f}F, "
-                    f"above your {setpoint_threshold_f:.0f}F threshold, as of "
-                    f"{now.isoformat()}. Someone may have changed it.\n\nTake a look."
-                ),
-            )
-            logger.info("Setpoint alert email sent to %s", recipient)
+
+    # Fetched lazily (only when an alert will actually be sent) and at most
+    # once per invocation, so a missing/unpopulated ntfy secret can't break
+    # the temperature check on every tick, and a fetch failure here doesn't
+    # prevent the email or state persistence below.
+    ntfy_topic = None
+    if ambient_alert_sent or setpoint_alert_sent:
+        try:
+            ntfy_topic = get_ntfy_topic()
+        except Exception:
+            logger.exception("Failed to fetch ntfy topic; skipping push notifications")
+
+    if ambient_alert_sent:
+        dispatch_alert(
+            sender,
+            recipient,
+            subject=f"Thermostat alert: {ambient_temp_f:.1f}F (over {threshold_f:.0f}F)",
+            body=(
+                f"Your Nest thermostat is reading {ambient_temp_f:.1f}F, above your "
+                f"{threshold_f:.0f}F threshold for {sustained_minutes:.0f} minutes, "
+                f"as of {now.isoformat()}.\n\nTake a look."
+            ),
+            ntfy_topic=ntfy_topic,
+            label="Ambient temperature",
+        )
+
+    if setpoint_alert_sent:
+        dispatch_alert(
+            sender,
+            recipient,
+            subject=(
+                f"Thermostat alert: cooling setpoint {setpoint_f:.1f}F "
+                f"(over {setpoint_threshold_f:.0f}F)"
+            ),
+            body=(
+                f"Your Nest thermostat's cooling setpoint is now {setpoint_f:.1f}F, "
+                f"above your {setpoint_threshold_f:.0f}F threshold, as of "
+                f"{now.isoformat()}. Someone may have changed it.\n\nTake a look."
+            ),
+            ntfy_topic=ntfy_topic,
+            label="Setpoint",
+        )
 
     set_state(
         state_param_name,

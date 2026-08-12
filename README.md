@@ -2,7 +2,8 @@
 
 EventBridge schedule -> Lambda (Docker container, Python) -> checks the Nest
 thermostat via the Google Smart Device Management (SDM) API -> emails an
-alert via SES to your own address if either:
+alert via SES (and pushes a notification via [ntfy.sh](https://ntfy.sh)) to
+your own address/device if either:
 - the **ambient temperature** is sustained over threshold (default 76F), or
 - the **cooling setpoint** is over threshold (default 76F) — e.g. someone
   bumped the thermostat up.
@@ -15,11 +16,18 @@ alert via SES to your own address if either:
   `ambientTemperatureCelsius` and `ThermostatTemperatureSetpoint.coolCelsius`,
   converts both to F, and evaluates each against its own threshold.
 - **Secrets Manager**: holds `google_client_id` / `google_client_secret` /
-  `google_refresh_token`. Never committed to the repo.
+  `google_refresh_token` in one secret, and the `ntfy_topic` in a separate
+  secret. Never committed to the repo.
 - **SES**: sends the alert email. Sender identity must be verified (click
   the link SES emails you). If sender == recipient (the default here), one
   verification covers both, and you can stay in the SES sandbox indefinitely
   since you're only ever emailing yourself.
+- **ntfy.sh**: pushes a companion notification to the same topic-based
+  channel every time an alert email is sent. The topic name is a shared
+  secret — anyone who knows it can publish to or subscribe to that channel
+  — so it's stored in Secrets Manager, never in `cdk.json`, GitHub secrets,
+  or the repo. Subscribe to your topic in the ntfy app/web UI to receive
+  the pushes.
 - **SSM Parameter Store**: holds a JSON parameter `{ambient, setpoint}`,
   each an independent `{over_since, last_alert_at}` streak.
 
@@ -108,6 +116,23 @@ aws secretsmanager put-secret-value \
       --query 'Stacks[0].Outputs[?OutputKey==`SecretArn`].OutputValue' --output text)" \
   --secret-string file://secret.json
 rm secret.json
+```
+
+## Populate the ntfy.sh topic secret
+
+Pick a hard-to-guess topic name (e.g. from https://ntfy.sh — it's the whole
+access control, so treat it like a password) and subscribe to it in the
+ntfy app or web UI. Then, same as the Google secret, do this yourself in
+your own terminal rather than pasting the real topic into a chat session:
+
+```bash
+cp ntfy_secret.example.json ntfy_secret.json
+# edit ntfy_secret.json with your real ntfy_topic
+aws secretsmanager put-secret-value \
+  --secret-id "$(aws cloudformation describe-stacks --stack-name NestTempAlertStack \
+      --query 'Stacks[0].Outputs[?OutputKey==`NtfySecretArn`].OutputValue' --output text)" \
+  --secret-string file://ntfy_secret.json
+rm ntfy_secret.json
 ```
 
 ## Test it
