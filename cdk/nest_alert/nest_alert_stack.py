@@ -58,6 +58,18 @@ class NestAlertStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
+        # Holds the ntfy.sh topic name used to push alert notifications.
+        # Treated as a secret (not a plain env var / CDK context value)
+        # because anyone who knows the topic name can publish to or
+        # subscribe to it. Populate the real value after deploy via:
+        #   aws secretsmanager put-secret-value --secret-id <arn> --secret-string file://ntfy_secret.json
+        ntfy_secret = secretsmanager.Secret(
+            self,
+            "NtfyTopic",
+            description="ntfy.sh topic name used to push alert notifications",
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
         # Sandbox SES requires the sending identity to be verified (a link is
         # emailed to sender_email). If sender == recipient, that one
         # verification covers both send and receive.
@@ -87,6 +99,7 @@ class NestAlertStack(Stack):
             memory_size=128,
             environment={
                 "SECRET_ARN": google_secret.secret_arn,
+                "NTFY_SECRET_ARN": ntfy_secret.secret_arn,
                 "NEST_PROJECT_ID": nest_project_id,
                 "NEST_DEVICE_ID": nest_device_id,
                 "SENDER_EMAIL": sender_email,
@@ -99,6 +112,7 @@ class NestAlertStack(Stack):
             },
         )
         google_secret.grant_read(fn)
+        ntfy_secret.grant_read(fn)
         fn.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["ses:SendEmail", "ses:SendRawEmail"],
@@ -170,5 +184,6 @@ class NestAlertStack(Stack):
         )
 
         CfnOutput(self, "SecretArn", value=google_secret.secret_arn)
+        CfnOutput(self, "NtfySecretArn", value=ntfy_secret.secret_arn)
         CfnOutput(self, "FunctionName", value=fn.function_name)
         CfnOutput(self, "GitHubActionsDeployRoleArn", value=github_deploy_role.role_arn)
